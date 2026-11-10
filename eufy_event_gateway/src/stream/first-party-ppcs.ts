@@ -41,6 +41,11 @@ import { decodePpcsAac } from "./ppcs-audio.js";
 import { ppcsCandidatePorts, ppcsLocalLookupTargets } from "./ppcs-lookup.js";
 import { PpcsLookupSocketPool } from "./ppcs-lookup-sockets.js";
 import { PpcsMediaStart } from "./ppcs-media-start.js";
+import { Resolver } from "node:dns/promises";
+import { isIP } from "node:net";
+import { createLogger } from "../logging.js";
+import { isT815xLteCamera } from "../provider/t815x-profile.js";
+import { T815xRelay, type RelayAddress } from "./t815x-relay.js";
 import { decodeSensorContactNotification, decodeSensorMotionNotification, type SensorContactObservation, type SensorMotionObservation } from "./sensor-status-notification.js";
 
 // PPCS wraps command payloads in an XZYH header. The outer F1 D0 UDP envelope,
@@ -81,6 +86,7 @@ const ATTACHED_MEDIA_RESTART_DELAY_MILLISECONDS = 250;
 const FIRST_VIDEO_FRAME_TIMEOUT_MILLISECONDS = 20_000;
 const CONTROL_TIMEOUT_MILLISECONDS = 10_000;
 const LOOKUP_RETRY_MILLISECONDS = 1_000;
+const lteLogger = createLogger("ppcs");
 const PPCS_RECEIVE_BUFFER_BYTES = 1024 * 1024;
 const PPCS_SEQUENCE_LOOKBACK = 0x8000;
 const PPCS_STALE_RETRANSMIT_DEPTH = 1024;
@@ -1382,6 +1388,9 @@ export type PpcsCipherKeyOutcome = { readonly kind: "key"; readonly value: strin
  */
 export interface PpcsCameraOptions {
 
+  /** Provider marks explicit live/snapshot starts only; the transport rechecks exact LTE identity. */
+  readonly onDemandLteRelay?: boolean;
+
   /** Internal bounded lookup deadline. Media and control lifetimes remain separate. */
   readonly lookupTimeoutMs?: number;
 
@@ -1638,6 +1647,14 @@ export class CameraControlAcknowledgementTimeoutError extends Error {
  * visible in diagnostics.
  */
 export class FirstPartyPpcsSession {
+  #lteRelay: T815xRelay<Socket> | null = null;
+  #lteResolver: Resolver | null = null;
+  #lteServers: RelayAddress[] = [];
+  readonly #lteChecks = new Map<Socket, Set<string>>();
+  #lteStartedAt = 0;
+  #lteStageAt = 0;
+  #ltePath: "none" | "direct" | "relay" = "none";
+  #lteMediaAckLogged = false;
 
   /** Ordered Annex-B video bytes; the session ends this stream when it closes. */
   readonly output = new PassThrough();
@@ -1859,6 +1876,15 @@ export class FirstPartyPpcsSession {
    * while every session gets a maximum-duration timer and heartbeat loop.
    */
   async start(): Promise<void> {
+    if (this.#options.onDemandLteRelay && isT815xLteCamera({ model: this.#options.cameraModel, deviceType: this.#options.cameraDeviceType ?? null })
+      && !this.#options.homeBaseAttached && this.#options.channel === 0
+      && this.#options.purpose !== "control" && this.#options.purpose !== "passive") {
+      this.#lteStartedAt = this.#lteStageAt = performance.now();
+      this.#lteRelay = new T815xRelay(encodeDid(this.#options.p2pDid), this.#options.dskKey, this.#socket,
+        (opcode, body, address, socket) => { if (!this.#closed) this.#send(Buffer.from([0xf1, opcode]), body, address, socket); },
+        stage => this.#logLteStage(stage));
+      this.#logLteStage("lookup_start");
+    }
 
     // Bind an ephemeral UDP port, then try LAN and cloud lookup addresses. A
     // successful CAM_ID response means the peer is reachable, not that video
@@ -1889,6 +1915,7 @@ export class FirstPartyPpcsSession {
       observeRawSocket(this.#socket, "ppcs", "udp");
       this.#socket.on("message", (message, info) => onMessage(message, info, this.#socket));
       this.#socket.bind(0, async () => {
+        if (this.#lteRelay && this.#closed) return;
         try {
           this.#socket.setRecvBufferSize(PPCS_RECEIVE_BUFFER_BYTES);
         } catch {
@@ -1907,6 +1934,7 @@ export class FirstPartyPpcsSession {
           reject(error);
         });
         if (decodeCloudAddresses(this.#options.appConnection).length > 0) await this.#lookupSockets.bindProbes();
+        if (this.#lteRelay) await this.#resolveLteServers();
         if (this.#closed) return;
         this.#lookup();
         this.#lookupTimer = setInterval(() => this.#lookup(), LOOKUP_RETRY_MILLISECONDS);
@@ -2983,6 +3011,10 @@ export class FirstPartyPpcsSession {
    */
   close(reason: PpcsStreamCloseReason = "client_stop"): void {
     if (this.#closed) return;
+    this.#lteRelay?.close();
+    this.#lteResolver?.cancel();
+    this.#lteChecks.clear();
+    if (this.#lteRelay) this.#logLteStage("closed");
     this.#mediaStart.close();
     this.#gatewayInfoRequest.close();
     this.#speaker?.close();
@@ -3062,10 +3094,10 @@ export class FirstPartyPpcsSession {
 
   /** Send LAN lookup to broadcast and known private targets, then query cloud rendezvous peers. */
   #lookup(): void {
-    if (this.#remote) return;
+    if (this.#closed || this.#remote) return;
     const local = Buffer.from([0, 0]);
     for (const address of ppcsLocalLookupTargets(this.#options.localAddress)) {
-      this.#send(REQ.localLookup, local, address);
+      if (!this.#lteRelay) this.#send(REQ.localLookup, local, address);
     }
     for (const socket of this.#lookupSockets?.sockets ?? [this.#socket]) {
       const lookup = buildPpcsCloudLookup(
@@ -3073,10 +3105,35 @@ export class FirstPartyPpcsSession {
         this.#options.dskKey,
         this.#selfAddress ? { host: this.#selfAddress.host, port: socket.address().port } : undefined,
       );
-      for (const address of decodeCloudAddresses(this.#options.appConnection)) {
+      for (const address of this.#lteRelay ? this.#lteServers : decodeCloudAddresses(this.#options.appConnection)) {
         this.#send(lookup.type, lookup.payload, address, socket);
       }
     }
+    this.#lteRelay?.tick();
+  }
+
+  /** Pin at most eight configured rendezvous hosts once; cancel DNS on session close. */
+  async #resolveLteServers(): Promise<void> {
+    const resolver = new Resolver({ timeout: 1000, tries: 1 });
+    this.#lteResolver = resolver;
+    const addresses = decodeCloudAddresses(this.#options.appConnection).slice(0, 8);
+    const resolved = await Promise.all(addresses.map(async address => {
+      if (isIP(address.host) === 4) return [address];
+      try { return (await resolver.resolve4(address.host)).slice(0, 2).map(host => ({ host, port: address.port })); }
+      catch { return []; }
+    }));
+    if (this.#lteResolver === resolver) this.#lteResolver = null;
+    if (this.#closed) return;
+    this.#lteServers = resolved.flat().slice(0, 8);
+    this.#lteRelay?.setLookupServers(this.#lteServers);
+    this.#logLteStage(this.#lteServers.length ? "rendezvous_ready" : "rendezvous_unavailable");
+  }
+
+  /** Emit bounded stage names and monotonic durations, never network endpoints or identities. */
+  #logLteStage(stage: string): void {
+    const at = performance.now();
+    lteLogger.info("camera_lte_stage", `model=${this.#options.cameraModel} stage=${stage} path=${this.#ltePath} stage_ms=${Math.round(Math.max(0, at - this.#lteStageAt))} total_ms=${Math.round(Math.max(0, at - this.#lteStartedAt))}`);
+    this.#lteStageAt = at;
   }
 
   /** Probe the base and adjacent ports on one lookup candidate for CAM_ID. */
@@ -3093,6 +3150,21 @@ export class FirstPartyPpcsSession {
    */
   #handle(message: Buffer, info: RemoteInfo, socket: Socket): boolean {
     if (this.#closed || (this.#remote && socket !== this.#socket)) return false;
+    if (this.#lteRelay) {
+      const source = { host: info.address, port: info.port };
+      if (this.#remote && (this.#remote.host !== info.address || this.#remote.port !== info.port)) return false;
+      if (!this.#remote) {
+        if (message.length < 4 || message[0] !== 0xf1 || message.readUInt16BE(2) !== message.length - 4) return false;
+        const relayReady = this.#lteRelay.receive(message, source, socket);
+        const opcode = message[1];
+        if (opcode === 0x41) return false; // LTE has no qualified LAN route.
+        if (opcode === 0x40 && !this.#lteRelay.fromLookupServer(source)) return false;
+        if (opcode === 0x82 && this.#lteRelay.fromLookupServer(source)) this.stats.alternateLookupCandidates++;
+        if ([0x21, 0x69, 0x71, 0x73, 0x81, 0x82].includes(opcode!)) return false;
+        if (opcode === 0x84 && !relayReady) return false;
+        if (opcode === 0x42 && !this.#lteChecks.get(socket)?.has(`${info.address}:${info.port}`)) return false;
+      }
+    }
     if (this.#options.purpose === "passive" && this.#remote
       && (info.address !== this.#remote.host || info.port !== this.#remote.port)) return false;
     if (has(message, RESP.localLookup)) {
@@ -3121,6 +3193,10 @@ export class FirstPartyPpcsSession {
       if (this.#lookupTimer) clearInterval(this.#lookupTimer);
       this.stats.camId++;
       this.#remote = { host: info.address, port: info.port };
+      if (this.#lteRelay) {
+        this.#ltePath = has(message, RESP.turnServerCamId) ? "relay" : "direct";
+        this.#lteRelay.close(); this.#lteChecks.clear(); this.#logLteStage("lookup_complete");
+      }
       this.#recordS340MediaStage("peer_selected");
       this.#send(REQ.ping, Buffer.alloc(0), this.#remote);
       const repairAttachedSetup = this.#options.homeBaseAttached
@@ -3153,6 +3229,9 @@ export class FirstPartyPpcsSession {
         for (let index = 0; index < count; index++) {
           const sequence = message.readUInt16BE(8 + index * 2);
           this.#mediaStart.acknowledge(sequence);
+          if (this.#lteRelay && this.stats.mediaStartAcknowledged > 0 && !this.#lteMediaAckLogged) {
+            this.#lteMediaAckLogged = true; this.#logLteStage("media_start_acked");
+          }
           this.#gatewayInfoRequest.acknowledge(sequence);
         }
       }
@@ -3483,6 +3562,7 @@ export class FirstPartyPpcsSession {
       }
       this.output.write(normalized);
       this.stats.videoOutputFrames++;
+      if (this.#lteRelay && this.stats.videoOutputFrames === 1) this.#logLteStage("first_video_output");
       this.#recordS340MediaStage("video_output");
       const framing = this.#videoNormalizer.framing;
       const result = decoded.protection === "clear" ? "written-clear" : `written-${decoded.protection}`;
@@ -3971,12 +4051,19 @@ export class FirstPartyPpcsSession {
 
   /** Retain the fully framed start so retries consume neither sequence counter. */
   #sendMediaStart(payload: Buffer): void {
+    if (this.#lteRelay && this.stats.mediaStartAttempts === 1) this.#logLteStage("media_start_sent");
     const packet = Buffer.concat([REQ.data, u16(payload.length), payload]);
     this.#mediaStart.start(payload.readUInt16BE(2), packet);
   }
 
   /** Ask one candidate endpoint to prove it owns the requested camera DID. */
   #check(address: { host: string; port: number }, socket: Socket): void {
+    if (this.#lteRelay) {
+      const candidates = this.#lteChecks.get(socket) ?? new Set<string>();
+      const key = `${address.host}:${address.port}`;
+      if (!candidates.has(key) && candidates.size >= 64) return;
+      candidates.add(key); this.#lteChecks.set(socket, candidates);
+    }
     this.#send(REQ.check, Buffer.concat([encodeDid(this.#options.p2pDid), Buffer.alloc(3)]), address, socket);
   }
 

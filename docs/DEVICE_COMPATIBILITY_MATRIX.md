@@ -64,87 +64,87 @@ serials, credentials, snapshots, and videos stay outside the repository.
 | eufyCam C37 | T814X, type 10037 | `unverified` | `implemented` | `unverified` | `unverified` | Admission added through a ready HomeBase 3 route. Hardware confirmation is outstanding. |
 | eufyCam E40 | T8144, type 49 | `implemented` | `reported` | `mixed` | `reported` | HomeBase 2 discovery, fresh snapshots, and motion, person, pet, and sound events are confirmed. Chrome live view can run for more than 100 seconds after an occasional failed first attempt, while Safari freezes on its first frame. |
 
-## T8151 idle-camera lookup investigation
+## T8151 idle-camera lookup and relay trial
 
-Investigation recorded on 10 November 2026, before a wake/relay implementation.
-The catalogue remains `ready_to_test`. This records a limitation and options;
-it does not add a sleep-recovery feature or change any transport behaviour.
+Hardware evidence recorded on 10 November 2026: an awake-camera attempt
+connected in 13,143 ms and later closed with 1,014 H.264 video frames, 1,087
+audio frames, an acknowledged level-1 start and `client_stop`. Four later
+presumed-idle attempts ended at approximately 20 seconds without a camera
+identity or media-start command. The official app reportedly opens live view
+reliably. Sleep is a plausible cause, but LTE NAT, stale peer endpoints and
+missing relay negotiation are distinct hypotheses. No power-state measurement
+or successful-app wake trace is available. The catalogue stays `ready_to_test`.
 
-An awake-camera attempt connected in 13,143 ms and later closed with 1,014
-H.264 video frames, 1,087 audio frames, an acknowledged level-1 media start and
-`client_stop`. Four later attempts ended at approximately 20 seconds with no
-camera identity and no media-start command. The reporter says the official app
-can open live view reliably. Sleep is a plausible cause, but no power-state
-measurement or successful-app protocol trace is available. LTE NAT, old peer
-endpoints and absent relay negotiation remain alternative explanations.
+The original generic PPCS lookup counts replies, including duplicates, across
+eight sockets. Its `alternate_lookup_candidates` counts `f182` replies, not
+relay success. Those endpoints need relay registration rather than ordinary
+CAM_CHECK. LAN replies in the generic path are not checked against the target
+DID, so the seven local replies in the successful trace do not prove the LTE
+camera answered on the LAN. `route=direct` describes standalone ownership.
+`media_start_low_power` and owned startup recovery apply after connection on
+other exact profiles; they cannot repair this lookup failure.
 
-### Existing gateway behaviour
+### Bounded on-demand trial
 
-- `parseMegaInventory` retains a peer DID and `p2p_conn`, falling back to
-  `app_conn`. The provider fetches the peer DSK separately. The connection
-  string supplies cloud rendezvous hosts; this path does not normalize an
-  inventory relay list. Actual T8151 inventory field presence and server
-  lists have not been inspected, and must not be inferred from grouped logs.
-- The session sends LAN lookup and cloud lookup from eight bound sockets.
-  Classic `f126` lookup replaces fallback `f16a` once the gateway's local
-  interface address is known. Candidate counters count replies, including
-  duplicates, rather than unique destinations. LAN replies are not checked
-  against the target DID in that branch, so seven replies do not prove that
-  an LTE camera was reached on the LAN.
-- `alternate_lookup_candidates` counts `f182` replies. The gateway treats
-  these as ordinary candidates and has no complete relay negotiation. A zero
-  counter neither proves a relay attempt nor identifies a missing cloud wake.
-  `route=direct` describes a standalone peer relationship, not a verified
-  network path.
-- `media_start_low_power` records one attached-doorbell error after connection;
-  it is not a wake mode. Owned startup recovery applies only to a specific
-  T8113-Z/T8010 combination after lookup. Neither repairs this failure stage.
-- The session caps lookup at 20 seconds. Fresh snapshots start a 30-second
-  deadline before source startup. Extending lookup alone cannot guarantee
-  snapshots. The first-image warmup can currently open T8151 automatically;
-  any future explicit-use-only wake must suppress it for this family.
+Exact T8150–T8153/type 110, standalone channel 0, can try a relay during an
+explicit HA live-view or fresh-snapshot request. Provider and transport both
+check that scope. Other devices retain the existing path. Recording-only and
+implicit starts do not gain relay permission. No configuration flag or Home
+Assistant integration change is needed on this test branch.
 
-### Reference review and implementation boundary
+The trial pins resolved inventory rendezvous hosts and accepts cloud replies
+only from those endpoints. Three seconds after an accepted request it can
+negotiate a relay list, hello, allocated port and relay request. Each step has
+at most three sends, with four relay destinations. An advertised endpoint gets
+four client registration packets on its originating socket, with at most four
+endpoint/socket registrations. Relay readiness must name the expected DID and
+match a negotiated endpoint and socket. Direct replies must come from an
+endpoint probed on that socket. The socket pool selects one winner and closes
+losers; close and timeout retire relay work and pending DNS.
+
+The existing 20-second lookup deadline remains the connection bound; there is
+no reconnect loop or background keep-alive. The early fallback threshold is a
+family-only trial policy, not an assertion about the vendor's threshold.
+Automatic first-image warmup is disabled for this family. Retained-image reads
+remain passive. Exact standalone LTE fresh captures get a 45-second default
+budget for lookup, the existing first-frame wait and JPEG extraction, inside
+the current integration's 60-second request. Explicit caller timeouts still
+win and other devices retain their 30-second default.
 
 The [bropat session](https://github.com/bropat/eufy-security-client/blob/master/src/p2p/session.ts)
-uses delayed secondary lookup and TURN-specific exchanges. Its local-only mode
-filters public candidates; its quickest mode permits them. No T8151 cloud-wake
-call was identified in the reviewed connect/start paths.
+and [SDK relay design](https://github.com/mega-yfue/eufy-sdk/pull/474) / [session](https://github.com/mega-yfue/eufy-sdk/blob/main/src/transport/p2p/p2p-session.ts)
+were reviewed for protocol behaviour. No reference source was copied. No
+verified T8151 HTTPS-wake endpoint or guest permission contract was found in
+those reviewed paths. The gateway's `common.start_stream.config` is a portal
+preflight read, not a wake command. Actual T8151 inventory values and extra
+server-list fields were unavailable; the relay trial uses PPCS-advertised
+endpoints rather than assuming such inventory fields exist.
 
-The [SDK relay design](https://github.com/mega-yfue/eufy-sdk/pull/474) and
-[current session](https://github.com/mega-yfue/eufy-sdk/blob/main/src/transport/p2p/p2p-session.ts)
-describe a relay handshake with distinct negotiation states, response validation
-and a longer connection budget. This is evidence of missing relay machinery,
-not confirmation that a relay wakes this T8151. Reference behaviour was reviewed;
-no external source code was copied.
+### Hardware acceptance
 
-The gateway's Mega `common.start_stream.config` read is a portal preflight,
-not a wake command. The separate RTC experiment refuses a matching
-`need_start_pn` requirement rather than implementing it. No verified T8151
-HTTPS-wake endpoint/payload or guest permission contract was found in the
-reviewed code. This does not establish that such an API is absent.
+Rebuild the fork app; its version stays 0.1.255. Close other viewers and the
+eufy app, wait at least five minutes without motion, then open HA live view.
+Measure time to a moving picture, close it, wait again and repeat three times.
+Compare the official app separately using the same guest account, without
+opening it immediately before the HA attempt. Test **Capture snapshot** after
+another idle interval and check that the image and timestamp are new.
 
-The requested small-fix boundary is reached: a correct relay path needs socket
-ownership, direct/relay race handling, response validation, coordinated budgets
-and cancellation tests. Per the reporter's scope constraint, stop at these
-options instead of introducing a speculative wake or changing shared timeouts:
+`component=ppcs event=camera_lte_stage` reports fixed stage names, `path`,
+`stage_ms` and `total_ms`. It excludes endpoints, serials, DIDs and keys.
+Expected relay progression is `lookup_accepted`, negotiation or
+`relay_advertised`, `relay_ready`, `lookup_complete path=relay`,
+`media_start_sent`, `media_start_acked` and `first_video_output`. A direct path
+can win instead. The last two observations can arrive in either order and
+normalized output is not proof of HA decoding. Close should produce `closed`
+and the existing provider `client_stop` outcome after the configured idle grace.
+No startup or still-image refresh should emit LTE stages.
 
-| Option | Required evidence or work |
-| --- | --- |
-| Bounded diagnostics first | For explicit requests on type 110/exact T8150–T8153 standalone routes only, observe fixed lookup response classes, request acceptance, counts and stage timings. Compare awake, presumed-idle and successful-app cases without raw payload logging. |
-| Family-only relay trial | Implement an isolated, validated relay state machine with bounded destinations/retries, deterministic winner selection, cancellation and coordinated live/snapshot deadlines. Suppress this family's startup warmup and leave other device behaviour intact. |
-| Cloud wake followed by lookup | First identify an official-app wake endpoint, payload, acknowledgement and guest permissions. Then send at most one bounded cancellable wake on an explicit request. A cloud acknowledgement is not proof of a peer or first frame. |
-
-For hardware qualification, wait at least five minutes without motion or another
-  viewer, open HA live view, close it, and repeat three times with another idle
-period each time. Test **Capture snapshot** separately and check its image time.
-Compare the official app using the same guest account; owner-account success
-does not establish guest wake permissions.
-Current success evidence is `cam_id=1`, media-stage video frames and a clean
-close; current logs cannot prove a wake or relay. A future implementation must
-identify the selected path and each setup stage, reject foreign/stale packets,
-stop on cancellation, and prove no media starts from restart, inventory refresh
-or retained-image reads. Observe battery and LTE use as well as playback.
+`lookup_rejected` or absent acceptance does not establish camera sleep.
+`exhausted` identifies a bounded relay attempt without establishing wake.
+Sleeping-camera reachability, guest permissions, wire reply shapes and latency
+remain unverified. If relay cannot reach the sleeping camera, identifying an
+actual official-app cloud-wake transaction is the next step; no such command
+is guessed by this implementation. Battery and LTE use need hardware checks.
 
 ## Doorbells and video locks
 

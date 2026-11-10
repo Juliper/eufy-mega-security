@@ -36,6 +36,9 @@ export interface StreamController {
    * With takeOver, an NVR may move its one call here from a camera that can yield.
    */
   startStream(serial: string, takeOver?: boolean): Promise<void>;
+  /** Only live viewers and fresh captures may request an on-demand LTE relay. */
+  startOnDemandStream?(serial: string, takeOver?: boolean): Promise<void>;
+  liveSnapshotTimeoutMilliseconds?(serial: string): number | undefined;
 
   /** Resolve after the old source's stop callbacks and owned media I/O have retired. */
   stopStream(serial: string): Promise<void>;
@@ -737,7 +740,7 @@ export class LiveStreamManager extends EventEmitter {
     // Start the provider only after the HTTP client is registered so the first
     // video bytes can be fanned out to Home Assistant immediately.
     try {
-      await this.#ensureStarted(serial, session, mayTakeCall);
+      await this.#ensureStarted(serial, session, mayTakeCall, true);
       if (view) this.#rememberDeliveredView(view);
     } catch (error) {
       this.#markViewerClose(session, response, "start_failed");
@@ -809,7 +812,7 @@ export class LiveStreamManager extends EventEmitter {
   /** Capture one fresh JPEG through the shared source and return its metadata. */
   async captureSnapshot(
     serial: string,
-    timeoutMilliseconds = SNAPSHOT_CAPTURE_TIMEOUT_MILLISECONDS,
+    timeoutMilliseconds?: number,
   ): Promise<SnapshotInfo> {
     if (this.#closed) throw new Error("Gateway closed before snapshot capture started");
     const session = this.#session(serial);
@@ -818,13 +821,14 @@ export class LiveStreamManager extends EventEmitter {
     this.#cancelStop(session);
     session.leases += 1;
     this.#updateState(serial, session);
-    const nextSnapshot = this.#waitForSnapshot(serial, previousRevision, timeoutMilliseconds);
+    const nextSnapshot = this.#waitForSnapshot(serial, previousRevision,
+      timeoutMilliseconds ?? this.controller.liveSnapshotTimeoutMilliseconds?.(serial) ?? SNAPSHOT_CAPTURE_TIMEOUT_MILLISECONDS);
 
     // PPCS startup can outlast the frame timer. Handle an early timeout now,
     // while still propagating it when startup settles and capture awaits it.
     void nextSnapshot.promise.catch(() => undefined);
     try {
-      await this.#ensureStarted(serial, session);
+      await this.#ensureStarted(serial, session, false, true);
       return await nextSnapshot.promise;
     } finally {
       nextSnapshot.cancel();
@@ -1311,7 +1315,7 @@ export class LiveStreamManager extends EventEmitter {
   }
 
   /** Share a pending provider start while keeping its settlement inside the owning session. */
-  async #ensureStarted(serial: string, session: Session, takeOver = false): Promise<void> {
+  async #ensureStarted(serial: string, session: Session, takeOver = false, onDemand = false): Promise<void> {
     if (this.#closed) throw new Error("Gateway closed before camera stream started");
     if (session.stop) throw new Error("Camera stream is still stopping");
     if (session.state === "error" && session.owned) throw new Error("Previous camera stream has not stopped");
@@ -1343,7 +1347,9 @@ export class LiveStreamManager extends EventEmitter {
 
       // A synchronous state observer may have retired the start before I/O.
       if (session.start === start && !this.#closed) {
-        void Promise.resolve(this.controller.startStream(serial, takeOver)).then(() => {
+        const starting = onDemand && this.controller.startOnDemandStream
+          ? this.controller.startOnDemandStream(serial, takeOver) : this.controller.startStream(serial, takeOver);
+        void Promise.resolve(starting).then(() => {
           if (session.start !== start) return;
           session.start = null;
           resolve();

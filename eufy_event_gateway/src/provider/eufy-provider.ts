@@ -51,6 +51,7 @@ import { EventNameHistoryError, eventHistoryCursor, eventHistoryId, nextEventHis
 
 import type { BatteryState, CameraIdentity, CameraPresetPosition, DetectionKind, HomeBaseState, InventoryDiagnostic, NightVisionMode, SecuritySensorState } from "../domain/types.js";
 import { createLogger } from "../logging.js";
+import { isT815xLteCamera, T815X_SNAPSHOT_TIMEOUT_MILLISECONDS } from "./t815x-profile.js";
 import type { CloudHistoryQuery, CloudHistoryRecord } from "../mega/cloud-history.js";
 import { CloudCalendarError, type CloudCalendarQuery, type CloudCalendarResult } from "../mega/cloud-calendar.js";
 import type { MegaInventory } from "../mega/types.js";
@@ -2592,12 +2593,25 @@ export class EufyProvider implements CameraProvider, CaptchaProvider {
     }
   }
 
+  /** Explicit consumers can opt into the exact LTE relay trial; background/control starts cannot. */
+  startOnDemandStream(serial: string, takeOver = false): Promise<void> {
+    return this.startStream(serial, takeOver, true);
+  }
+
+  /** Keep explicit LTE captures inside the integration's existing 60s HTTP budget. */
+  liveSnapshotTimeoutMilliseconds(serial: string): number | undefined {
+    const device = this.#devices.get(serial);
+    const route = device ? ppcsStreamRoute(device, this.#devices) : null;
+    return device && isT815xLteCamera(device) && route?.homeBaseAttached === false && device.channel === 0
+      ? T815X_SNAPSHOT_TIMEOUT_MILLISECONDS : undefined;
+  }
+
   /**
    * Share an in-flight media start and wait for existing pan/preset ownership.
    * Stop cancels that wait without waking a peer after the control has retired.
    * Control waits and lookup retries retain their existing bounded deadlines.
    */
-  async startStream(serial: string, takeOver = false): Promise<void> {
+  async startStream(serial: string, takeOver = false, onDemand = false): Promise<void> {
     this.#assertRtcPreparationIdle();
     const nvrStartingDevice = this.#devices.get(serial);
     if (nvrStartingDevice && this.#nvrLiveJobs.has(nvrStartingDevice.parentSerial)) throw new NvrLiveControlError("busy");
@@ -2708,7 +2722,7 @@ export class EufyProvider implements CameraProvider, CaptchaProvider {
       }
       for (let attempt = 0; ; attempt++) {
         current();
-        try { await this.#startStreamOnce(serial, current, cancellation.signal); return; }
+        try { await this.#startStreamOnce(serial, current, cancellation.signal, onDemand); return; }
         catch (error) {
           current();
           const device = this.#devices.get(serial);
@@ -2989,7 +3003,7 @@ export class EufyProvider implements CameraProvider, CaptchaProvider {
     } finally { try { await release?.(); } finally { this.#nvrLiveJobs.delete(station.serial); } }
   }
 
-  async #startStreamOnce(serial: string, current: () => void, signal: AbortSignal): Promise<void> {
+  async #startStreamOnce(serial: string, current: () => void, signal: AbortSignal, onDemand = false): Promise<void> {
     const startedAt = performance.now();
     current();
     if (this.#recordingPeerReserved(serial)) throw new Error("Wait for recording retrieval before starting live view");
@@ -3036,6 +3050,7 @@ export class EufyProvider implements CameraProvider, CaptchaProvider {
           }
         }
         const stream = new FirstPartyPpcsSession({
+          ...(onDemand && isT815xLteCamera(device) && !route.homeBaseAttached && device.channel === 0 ? { onDemandLteRelay: true } : {}),
           ...(device.model === "T8170" && device.deviceType === 48 && !route.homeBaseAttached ? { lookupTimeoutMs: 8_000 } : {}),
           stationSerial: peer.serial, p2pDid: peer.p2pDid, appConnection: peer.p2pConnection,
           localAddress: peer.localAddress,
@@ -5333,7 +5348,7 @@ export class EufyProvider implements CameraProvider, CaptchaProvider {
       doorbellSupported: isDoorbellDevice(device),
       streamSupported: nvrLive || isPpcsStreamSupported(device, this.#devices, dskPeerSerials) || this.#doorbellRtcBinding(device),
       hlsIdleHandoverSupported: nvrLive,
-      ...(nvrLive ? { startupSnapshotSupported: false } : {}),
+      ...(nvrLive || isT815xLteCamera(device) ? { startupSnapshotSupported: false } : {}),
       liveAudioSupported: nvrLive ? nvrLiveAudioAdmitted(device, this.#devices.get(device.parentSerial))
         : supportsCameraLiveAudio(device, route, isPpcsStreamSupported(device, this.#devices, dskPeerSerials)),
       enabled: device.reads.enabled ?? null,

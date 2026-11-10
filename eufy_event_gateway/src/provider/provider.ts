@@ -187,6 +187,8 @@ export interface CameraProvider {
 
   start(events: ProviderEvents): Promise<void>;
   startStream(serial: string): Promise<void>;
+  startOnDemandStream?(serial: string, takeOver?: boolean): Promise<void>;
+  liveSnapshotTimeoutMilliseconds?(serial: string): number | undefined;
   stopStream(serial: string): Promise<void>;
 
   /** Play bounded native AAC on the leased live source, stopping on cancellation or failure. */

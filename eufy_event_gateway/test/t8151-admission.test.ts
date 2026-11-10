@@ -13,6 +13,7 @@ import { describeCameraCapabilities } from "../src/provider/device-capabilities-
 import { EufyProvider, inventoryLogSummaries, isPpcsStreamSupported, parseMegaInventory, ppcsStreamRoute,
   safePushLogSummary } from "../src/provider/eufy-provider.js";
 import type { ProviderEvents } from "../src/provider/provider.js";
+import { supportsStartupSnapshot } from "../src/startup-snapshot-warmup.js";
 
 // Values demonstrate the existing decoders; they are not hardware measurements.
 const inventory = { devices: [{
@@ -75,6 +76,10 @@ test("T8151 publishes battery state and camera detections without a managed stat
   try {
     await provider.start(events);
     assert.equal(cameras.length, 1);
+    assert.equal(cameras[0]!.startupSnapshotSupported, false);
+    assert.equal(supportsStartupSnapshot({ ...cameras[0]!, streamSupported: true }), false);
+    assert.equal(provider.liveSnapshotTimeoutMilliseconds("lte-camera"), 45_000);
+    assert.equal(provider.liveSnapshotTimeoutMilliseconds("unknown"), undefined);
     assert.deepEqual(cameras[0]!.battery, {
       supported: ["level", "charging", "temperature"], level: 82, charging: true,
       health: null, temperature: 24.5, lastChargingDays: null,

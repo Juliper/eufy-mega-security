@@ -38,6 +38,7 @@ If you are new to the project, read [`DEVELOPERS_START_HERE.md`](DEVELOPERS_STAR
 | `eufy_event_gateway/src/provider/provider.ts` | Narrow adapter interface separating a real or simulated provider from state and HTTP code. |
 | `eufy_event_gateway/src/provider/eufy-provider.ts` | Translates Mega inventory/push/media observations into provider callbacks and selects first-party PPCS for live video. |
 | `eufy_event_gateway/src/provider/camera-capability-core.ts` | Small live lookup of existing camera media, events, and battery reads. |
+| `eufy_event_gateway/src/provider/t815x-profile.ts` | Exact LTE family admission and bounded fresh-snapshot budget for the on-demand relay trial. |
 | `eufy_event_gateway/src/provider/{sensor,homebase,doorbell}-capability-core.ts` | Small core family lookups. |
 | `eufy_event_gateway/src/provider/device-capability-core.ts` | Shared row shape used by each family definition file. |
 | `eufy_event_gateway/src/provider/device-capabilities-core.ts` | Shared evaluator for all camera, sensor, HomeBase, and doorbell core lookups; separates evidence from support without admitting unsupported devices. |
@@ -61,6 +62,7 @@ If you are new to the project, read [`DEVELOPERS_START_HERE.md`](DEVELOPERS_STAR
 | Path | Purpose |
 | --- | --- |
 | `src/stream/first-party-ppcs.ts` | Production Eufy PPCS UDP lookup, CAM_CHECK, HomeBase key unwrap, media request, H.264 extraction, and heartbeat. PPCS means Eufy's peer-to-peer camera transport. |
+| `src/stream/t815x-relay.ts` | Timer-free LTE relay negotiation borrowed by an explicit camera session, with bounded stages and endpoint/socket/DID validation. |
 | `src/stream/homebase-event-names.ts` | Reads one owner-bound doorbell history page, exposes aggregate diagnostics and privately selects a single name for an exact notification record/path. |
 | `src/stream/homebase-recordings.ts` | Reads owned SoloCam E30 history through HomeBase 3 and verifies bounded saved transfers with per-download recipient keys. |
 | `src/stream/stored-recordings.ts` | Reads standalone SoloCam SD events and finalizes and verifies saved MP4 media. |
