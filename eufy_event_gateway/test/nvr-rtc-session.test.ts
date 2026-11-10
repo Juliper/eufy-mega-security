@@ -356,6 +356,7 @@ for (const scenario of ['repaired-gap', 'missing-gap', 'missing-video-gap', 'ful
     });
   }
   const timingReports: NvrTimings[] = [];
+  let clientPeer: RTCPeerConnection | undefined, clientSocket: WebSocket | undefined;
   const latePictures: Buffer[] = [];
   const nativeVideoNow = performance.now.bind(performance);
   let videoProgressOffset = 0;
@@ -376,9 +377,10 @@ for (const scenario of ['repaired-gap', 'missing-gap', 'missing-video-gap', 'ful
     socket: (url, protocols, options) => {
       assert.equal(url, 'wss://security-smart-ie.eufylife.com/v1/rtc/ws/join?reqtype=nvr');
       assert.equal(options.followRedirects, false); assert.equal(options.maxPayload, 65536);
-      return new WebSocket(`ws://127.0.0.1:${(address as { port: number }).port}`, protocols, options);
+      return clientSocket = new WebSocket(`ws://127.0.0.1:${(address as { port: number }).port}`, protocols, options);
     }, peer: () => {
       const client = new RTCPeerConnection({ iceServers: [], iceUseIpv6: false });
+      clientPeer = client;
       if (scenario === 'repaired-gap' || scenario === 'missing-gap' || scenario === 'missing-video-gap' || scenario === 'full-queue') {
         const create = client.createDataChannel.bind(client);
         client.createDataChannel = (label, options) => {
@@ -488,7 +490,16 @@ for (const scenario of ['repaired-gap', 'missing-gap', 'missing-video-gap', 'ful
       assert.deepEqual(scheduled, []);
       await assert.rejects(session.readState(), { stage: "admission" });
       if (scenario === 'observer-signalling-close') {
-        socket!.close(); await new Promise(resolve => setTimeout(resolve, 100));
+        // This scenario retires signalling after setup. Discovery can finish
+        // before ICE gathering: closing in that gap races a local candidate's
+        // signalling send rather than testing the established observer.
+        assert.ok(clientPeer); assert.ok(clientSocket);
+        if (clientPeer.iceGatheringState !== 'complete') {
+          await clientPeer.iceGatheringStateChange.watch(state => state === 'complete', 5000);
+        }
+        assert.equal(clientPeer.iceGatheringState, 'complete');
+        const closed = once(clientSocket, 'close', { signal: AbortSignal.timeout(5000) });
+        socket!.close(); await closed;
         assert.equal(session.stats.signallingClosuresAfterModeObservation, 1);
         assert.equal(session.stats.signallingClosuresAfterVideo, 0);
       }

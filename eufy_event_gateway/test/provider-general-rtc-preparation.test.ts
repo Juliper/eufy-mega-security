@@ -104,10 +104,12 @@ test("every public effect method refuses before inspecting its arguments", async
   f.connect.mock.mockImplementation(async () => await new Promise<never>(() => {}));
   f.provider.prepareGeneralRtc("synthetic-one");
   const permitted = new Set(["constructor", "close", "submitCaptcha", "submitVerification", "getCaptchaChallenge", "isVerificationRequired",
-    "streamDiagnostic", "modelControlTrials", "modelControlTrialAdmission", "nvrLiveSettingAdmitted", "nvrSharedLensViewsAdmitted", "setNvrLiveMediaChecks", "prepareGeneralRtc", "generalRtcPrepareStatus"]);
+    "streamDiagnostic", "modelControlTrials", "modelControlTrialAdmission", "nvrLiveSettingAdmitted", "nvrSharedLensViewsAdmitted", "setNvrLiveMediaChecks", "prepareGeneralRtc", "generalRtcPrepareStatus", "liveSnapshotTimeoutMilliseconds"]);
   assert.equal(f.provider.nvrSharedLensViewsAdmitted("missing"), false, "admission reads no device or account state over the network");
+  assert.equal(f.provider.liveSnapshotTimeoutMilliseconds("missing"), undefined, "snapshot budget reads only cached inventory while effects are gated");
   const guarded = new Set(["readReportedParameters", "refreshLock", "setLockState", "setLockSetting", "cloudHistory", "cloudCalendar", "cloudRecordingTrial", "readRecordingIndexTrial", "readLocalMotionTrial", "readT85V0StatusTrial", "listStoredRecordings", "diagnoseEventNames", "diagnoseEventPicture", "downloadStoredRecording", "start", "reserveGeneralRtcTrial", "reserveDoorbellRtcTrial", "reserveNvrLiveTrial", "readNvrStateTrial", "testNvrCameraPower", "testNvrGuardMode", "startStream", "setNvrView", "performNvrLiveControl", "stopStream", "playCameraAudio", "setCameraEnabled", "setE21Preference", "setCameraPreference", "setCameraSetting", "performModelControlTrial", "setCameraMotionDetection", "setCameraAudioRecording", "setCameraStreamingQuality", "refreshCameraCapabilities", "setCameraGuardMode", "setCameraNightVision", "refreshStation", "setGuardMode", "setAlarmVolume", "setPromptVolume", "setAlarmTone", "setCameraLight", "panCamera", "setCameraSiren", "getCameraPresetPositions", "selectCameraPresetPosition", "setCameraAiTracking", "setCameraAutoCruise", "setHomeBaseSiren"]);
   const actual = Object.getOwnPropertyNames(EufyProvider.prototype);
+  guarded.add("startOnDemandStream");
   assert.deepEqual(new Set(actual), new Set([...permitted, ...guarded]));
   for (const name of guarded) {
     const operation = Reflect.get(f.provider, name) as (...args: unknown[]) => unknown;
