@@ -5,31 +5,41 @@ id: t8150
 name: 4G LTE Starlight Camera (S230)
 category: camera
 integration:
-  status: recognised
+  status: ready_to_test
+  handler: camera
 models:
   - T8150
   - T8151
   - T8152
   - T8153
 device_type: 110
+notes: >-
+  Hardware evidence is from T8151 in EU/DE on gateway 0.1.255 with a shared guest
+  account. Inventory reports battery parameters 1101, 2111, and 1138, and push
+  event 3101 is received. Camera admission, motion/person delivery to Home
+  Assistant, live view over LTE/PPCS relay, and snapshots still need hardware
+  confirmation. Other listed model variants have not been hardware-verified.
 capabilities:
   readable:
     battery_level:
       connections:
         direct:
-          status: declared
+          status: reported
+          notes: T8151 EU/DE gateway diagnostics report battery.level (parameter 1101); value accuracy is unverified.
       read:
         parameter: 1101
     battery_charging:
       connections:
         direct:
-          status: declared
+          status: reported
+          notes: T8151 EU/DE gateway diagnostics report battery.charging (parameter 2111); charging transitions are unverified.
       read:
         parameter: 2111
     battery_temperature:
       connections:
         direct:
-          status: declared
+          status: reported
+          notes: T8151 EU/DE gateway diagnostics report battery.temperature (parameter 1138); value accuracy is unverified.
       read:
         parameter: 1138
     last_charging_days:

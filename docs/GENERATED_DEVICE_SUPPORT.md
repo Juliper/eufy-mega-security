@@ -22,6 +22,7 @@ hardware evidence and topology-specific results remain in
 | T8141, T8142, T8142-Z | eufyCam 2C Pro (S220) | 15 | camera | supported |
 | T8144 | eufyCam E40 | 49 | camera | supported |
 | T814X, T814XS | eufyCam C37 | 10037 | camera | supported |
+| T8150, T8151, T8152, T8153 | 4G LTE Starlight Camera (S230) | 110 | camera | ready_to_test |
 | T8160 | eufyCam 3 (S330) | 19 | camera | supported |
 | T8161 | eufyCam 3C (S300) | 23 | camera | supported |
 | T8162 | eufyCam S3 Pro | 26 | camera | supported |
